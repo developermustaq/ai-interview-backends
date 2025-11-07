@@ -1,12 +1,14 @@
-import "dotenv/config";
+import dotenv from "dotenv";
 import express from "express";
 import http from "http";
-import { WebSocketServer } from "ws";
+import {  WebSocketServer } from "ws";
 import { v4 as uuidv4 } from "uuid";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import OpenAI from "openai";
+
+dotenv.config();
 
 // Keep LangGraph minimal: use it for persona (stateful, no loops)
 import { StateGraph, Annotation } from "@langchain/langgraph";
@@ -17,6 +19,8 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
+
+console.log(process.env.OPENAI_API_KEY );
 
 const PORT = Number(process.env.PORT || 3001);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -428,7 +432,15 @@ Be honest and strict. 5-8 sentences.`
 
 const SESSIONS = new Map(); // sessionId -> { state }
 const TMP_DIR = path.join(__dirname, "tmp");
-if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR);
+
+// Create tmp directory if it doesn't exist
+try {
+  if (!fs.existsSync(TMP_DIR)) {
+    fs.mkdirSync(TMP_DIR, { recursive: true });
+  }
+} catch (err) {
+  console.warn('Could not create tmp directory:', err.message);
+}
 
 /* --------------------- WS Protocol (voice-only, conversational) ---------------------
 
@@ -634,8 +646,10 @@ wss.on("connection", (ws) => {
 
 app.get("/health", (_, res) => res.json({ ok: true }));
 
+// Start the server
 server.listen(PORT, () => {
-  console.log(`WS+HTTP server running on http://localhost:${PORT}`);
+  console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`WebSocket server ready for connections`);
 });
 
 
