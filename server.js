@@ -498,42 +498,51 @@ async function evaluateConversation(state) {
     contextInfo += `\n- Interview Round: ${s.selectedRound}`;
   }
 
-  // Strict evaluation with detailed analysis
+  // Friendly and constructive evaluation with improvement suggestions
   const rubricJSON = await llm(
     [
       {
         role: "system",
-        content: `You are a STRICT and experienced tech interviewer evaluating a candidate. 
+        content: `You are a FRIENDLY and experienced tech interviewer evaluating a candidate. Your goal is to provide constructive, encouraging feedback that helps the candidate improve.
 
 ${contextInfo}
 
-You must evaluate STRICTLY based on:
-1. How many questions were answered (${answersGiven} out of ${questionsAsked})
-2. Quality and correctness of each answer
-3. Technical depth and accuracy
-4. Communication clarity
-5. Problem-solving approach
-6. Relevance to the role
-7. Confidence and articulation
+You must evaluate based on:
+1. Communication Skills: Clarity, articulation, structure, listening, engagement, how well they express ideas
+2. Technical Skills: Accuracy, depth, knowledge, correctness, understanding of technical concepts
+3. Problem Solving: Approach, logic, creativity, analytical thinking, solution quality, how they break down problems
+4. Behavior: Professionalism, attitude, confidence, enthusiasm, teamwork, body language (from tone), how they present themselves
+5. Relevance: How well answers match the role and level expectations
 
-Be STRICT in your evaluation:
-- Deduct points for incomplete answers
-- Deduct points for incorrect technical information
-- Deduct points for vague or unclear responses
-- Reward detailed, accurate, and well-structured answers
+Be CONSTRUCTIVE and FRIENDLY in your evaluation:
+- Acknowledge what the candidate did well
+- Identify specific areas for improvement
+- Provide actionable suggestions
+- Be encouraging while being honest
 - Consider the ${s.level} level expectations
+- Remember: everyone can improve, and your feedback should help them grow
 
 Return ONLY a JSON object:
 {
-  "communication": n (0-10, strict),
-  "technical": n (0-10, strict),
-  "problem_solving": n (0-10, strict),
-  "relevance": n (0-10, strict),
-  "confidence": n (0-10, strict),
+  "communication": n (0-10),
+  "technical": n (0-10),
+  "problem_solving": n (0-10),
+  "behavior": n (0-10),
+  "relevance": n (0-10),
   "questions_answered": ${answersGiven},
   "total_questions": ${questionsAsked},
   "answer_quality": "excellent/good/fair/poor",
-  "notes": "Detailed evaluation in ${s.language} including: how many questions answered correctly, what was right/wrong, specific strengths and weaknesses"
+  "strengths": ["List 2-3 specific strengths in ${s.language}"],
+  "improvements": {
+    "communication": "Specific suggestion on how to improve communication in ${s.language}",
+    "technical": "Specific suggestion on how to improve technical skills in ${s.language}",
+    "problem_solving": "Specific suggestion on how to improve problem-solving in ${s.language}",
+    "behavior": "Specific suggestion on how to improve behavior/professionalism in ${s.language}"
+  },
+  "hiring_tips": ["Tip 1 on how to talk to get hired in ${s.language}", "Tip 2", "Tip 3"],
+  "dos": ["Do 1 - specific actionable advice for future interviews in ${s.language} (e.g., 'Do prepare specific examples of your work', 'Do ask clarifying questions', 'Do maintain eye contact and confident body language')", "Do 2 - another specific actionable advice", "Do 3 - another specific actionable advice"],
+  "donts": ["Don't 1 - specific thing to avoid in interviews in ${s.language} (e.g., 'Don't speak too fast or mumble', 'Don't interrupt the interviewer', 'Don't give vague answers without examples')", "Don't 2 - another specific thing to avoid", "Don't 3 - another specific thing to avoid"],
+  "notes": "Overall evaluation summary in ${s.language} highlighting key points"
 }`
       },
       {
@@ -541,18 +550,28 @@ Return ONLY a JSON object:
         content: `Full Conversation Transcript:\n\n${convo}\n\nQ&A Pairs Analysis:\n${qaPairs.map((qa, idx) => `Q${idx + 1}: ${qa.question}\nA${idx + 1}: ${qa.answer}`).join('\n\n')}`
       }
     ],
-    { temperature: 0.1, model: "gpt-4o-mini" }
+    { temperature: 0.3, model: "gpt-4o-mini" }
   );
 
   let parsed = {
     communication: 5,
     technical: 5,
     problem_solving: 5,
+    behavior: 5,
     relevance: 5,
-    confidence: 5,
     questions_answered: answersGiven,
     total_questions: questionsAsked,
     answer_quality: "fair",
+    strengths: [],
+    improvements: {
+      communication: "",
+      technical: "",
+      problem_solving: "",
+      behavior: ""
+    },
+    hiring_tips: [],
+    dos: [],
+    donts: [],
     notes: "Evaluation in progress.",
   };
   try {
@@ -566,34 +585,35 @@ Return ONLY a JSON object:
     (Number(parsed.communication) || 0) +
     (Number(parsed.technical) || 0) +
     (Number(parsed.problem_solving) || 0) +
-    (Number(parsed.relevance) || 0) +
-    (Number(parsed.confidence) || 0);
+    (Number(parsed.behavior) || 0) +
+    (Number(parsed.relevance) || 0);
 
-  // Detailed summary with strict evaluation
+  // Friendly and constructive summary with improvement suggestions
   const summaryText = await llm(
     [
       {
         role: "system",
-        content: `You are a STRICT HR recruiter evaluating a candidate. 
+        content: `You are a FRIENDLY and supportive interviewer providing constructive feedback. Be encouraging, specific, and helpful.
 
 ${contextInfo}
 
-Provide a STRICT evaluation in ${s.language}:
-1. Start with how many questions were answered (${answersGiven}/${questionsAsked})
-2. Analyze answer quality and correctness
-3. Identify what was answered correctly and what was wrong
-4. Highlight specific strengths and weaknesses
-5. Provide detailed feedback on technical accuracy
-6. End with a clear recommendation: "Recommendation: Hire / Maybe / No Hire"
+Provide a FRIENDLY evaluation in ${s.language}:
+1. Start with a positive, encouraging tone
+2. Acknowledge what went well (${answersGiven}/${questionsAsked} questions answered)
+3. Highlight 2-3 key strengths
+4. Identify 2-3 specific areas for improvement with actionable suggestions
+5. Provide tips on how to improve communication, technical skills, problem-solving, and behavior
+6. Include 2-3 practical tips on "how to talk to get hired"
+7. End with encouragement and next steps
 
-Be honest and strict. 5-8 sentences.`
+Be friendly, constructive, and specific. 8-12 sentences. Use a warm, supportive tone like a mentor would.`
       },
       {
         role: "user",
-        content: `Full Conversation:\n\n${convo}\n\nDetailed Q&A:\n${qaPairs.map((qa, idx) => `Question ${idx + 1}: ${qa.question}\nAnswer ${idx + 1}: ${qa.answer}\n---`).join('\n\n')}`
+        content: `Full Conversation:\n\n${convo}\n\nDetailed Q&A:\n${qaPairs.map((qa, idx) => `Question ${idx + 1}: ${qa.question}\nAnswer ${idx + 1}: ${qa.answer}\n---`).join('\n\n')}\n\nEvaluation Scores:\n- Communication: ${parsed.communication}/10\n- Technical: ${parsed.technical}/10\n- Problem Solving: ${parsed.problem_solving}/10\n- Behavior: ${parsed.behavior}/10\n- Relevance: ${parsed.relevance}/10\n\nStrengths: ${parsed.strengths?.join(', ') || 'N/A'}\n\nImprovements Needed:\n- Communication: ${parsed.improvements?.communication || 'N/A'}\n- Technical: ${parsed.improvements?.technical || 'N/A'}\n- Problem Solving: ${parsed.improvements?.problem_solving || 'N/A'}\n- Behavior: ${parsed.improvements?.behavior || 'N/A'}`
       }
     ],
-    { temperature: 0.2, model: "gpt-4o-mini" }
+    { temperature: 0.4, model: "gpt-4o-mini" }
   );
 
   return {
