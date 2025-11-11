@@ -35,6 +35,8 @@ const InterviewState = Annotation.Root({
   candidateName: { type: "string", optional: true },
   role: { type: "string" },
   roleId: { type: "string", optional: true },
+  customJobRole: { type: "string", optional: true },
+  jobDescription: { type: "string", optional: true },
   selectedLanguage: { type: "string", optional: true },
   selectedRound: { type: "string", optional: true },
   level: { type: "string" },
@@ -65,6 +67,8 @@ function initialState(overrides = {}) {
     candidateName: undefined,
     role:  "Software Engineer",
     roleId: undefined,
+    customJobRole: undefined,
+    jobDescription: undefined,
     selectedLanguage: undefined,
     selectedRound: undefined,
     level: "junior",
@@ -107,6 +111,8 @@ function normalizeState(s = {}, frontendValues = {}) {
     candidateName: isValid(s.candidateName) ? String(s.candidateName).trim() : undefined,
     role: getValue("role", "Software Engineer"),
     roleId: isValid(s.roleId) ? s.roleId : undefined,
+    customJobRole: isValid(s.customJobRole) ? String(s.customJobRole).trim() : undefined,
+    jobDescription: isValid(s.jobDescription) ? String(s.jobDescription).trim() : undefined,
     selectedLanguage: getValue("selectedLanguage", "java"),
     selectedRound: getValue("selectedRound", "technical"),
     level: getValue("level", "junior"),
@@ -146,7 +152,16 @@ async function generateStyle(state) {
   
   const round = state.selectedRound ? roundInfo[state.selectedRound] || { name: state.selectedRound, focus: "relevant skills" } : null;
   
-  let context = `${state.level || "junior"} ${state.role || "Software Engineer"} interview`;
+  // Use custom job role if provided
+  const jobRole = state.customJobRole || state.role || "Software Engineer";
+  
+  let context = `${state.level || "junior"} ${jobRole} interview`;
+  
+  // Add job description to context if provided
+  if (state.jobDescription && state.jobDescription.trim() !== "") {
+    context += `. Job Description: ${state.jobDescription.trim()}`;
+  }
+  
   if (state.selectedLanguage && state.selectedLanguage.trim() !== "") {
     context += ` focusing on ${state.selectedLanguage}`;
   }
@@ -174,9 +189,17 @@ async function generateStyle(state) {
     languageName: languageName,
     selectedRound: state.selectedRound,
     round: round ? round.name : "none",
+    jobRole: jobRole,
+    hasJobDescription: !!(state.jobDescription && state.jobDescription.trim() !== ""),
   });
   
   const roundContext = round ? ` This is a ${round.name}, so focus on ${round.focus}.` : "";
+  
+  // Build job context with description if available
+  let jobContext = `Role: ${jobRole} (${state.level || "junior"} level)`;
+  if (state.jobDescription && state.jobDescription.trim() !== "") {
+    jobContext += `\nJob Description: ${state.jobDescription.trim()}`;
+  }
   
   const content = await llm(
     [
@@ -189,8 +212,11 @@ CRITICAL LANGUAGE REQUIREMENT: You MUST respond in ${languageName} (language cod
 Context: ${context}.${roundContext}
 ${round ? `ROUND TYPE: This is a ${round.name}. You MUST ask questions focused on: ${round.focus}.` : ""}
 
+${jobContext}
+
 Keep it to 2–3 sentences. Include tone/style + 1–2 rules (be concise, ask relevant follow-ups).
 ${round ? `As this is a ${round.name}, emphasize asking questions related to ${round.focus}.` : ""}
+${state.jobDescription ? `Use the job description provided above to tailor questions to the specific role requirements.` : ""}
 
 IMPORTANT: 
 - Respond ONLY in ${languageName}. Do not use English or any other language.
@@ -280,6 +306,18 @@ async function speakGreeting(ws, state, voice = "alloy") {
     round: round ? round.name : "none",
   });
   
+  // Use custom job role if provided
+  const jobRole = s.customJobRole || s.role || "Software Engineer";
+  
+  // Build greeting context with job description if available
+  let greetingContext = `Mention role (${jobRole}) and level (${s.level}).`;
+  if (s.jobDescription && s.jobDescription.trim() !== "") {
+    greetingContext += ` Briefly reference the job requirements if relevant.`;
+  }
+  if (round) {
+    greetingContext += ` Mention that this is a ${round.name}.`;
+  }
+  
   const content = await llm(
     [
       {
@@ -288,7 +326,9 @@ async function speakGreeting(ws, state, voice = "alloy") {
 
 CRITICAL LANGUAGE REQUIREMENT: You MUST respond in ${languageName}. Every word must be in ${languageName}. Do not use English or any other language.
 
-2 sentences max. Mention role (${s.role}) and level (${s.level}).${round ? ` Mention that this is a ${round.name}.` : ""} Ask them to introduce themselves in ~30 seconds before we begin.
+2 sentences max. ${greetingContext} Ask them to introduce themselves in ~30 seconds before we begin.
+
+${s.jobDescription ? `Job Description Context: ${s.jobDescription.trim()}\nUse this to make the greeting more specific to the role if appropriate.` : ""}
 
 CRITICAL RULE: You must NEVER start your response with the word 'Interviewer' or 'Interviewer:' or any speaker label. Always start directly with your greeting. Do not use any prefixes, labels, or speaker identifiers.`
       }
@@ -372,6 +412,9 @@ async function generateInterviewerTurn(state) {
   
   const round = s.selectedRound ? roundInfo[s.selectedRound] || { name: s.selectedRound, focus: "relevant skills" } : null;
   
+  // Use custom job role if provided
+  const jobRole = s.customJobRole || s.role || "Software Engineer";
+  
   console.log("=== GENERATE INTERVIEWER TURN - LANGUAGE & ROUND CHECK ===");
   console.log({
     language: s.language,
@@ -379,6 +422,8 @@ async function generateInterviewerTurn(state) {
     languageName: languageName,
     selectedRound: s.selectedRound,
     round: round ? round.name : "none",
+    jobRole: jobRole,
+    hasJobDescription: !!(s.jobDescription && s.jobDescription.trim() !== ""),
   });
 
   const systemPrompt = (s.styleTemplate || "You are an interviewer.") + 
@@ -387,6 +432,12 @@ async function generateInterviewerTurn(state) {
   const roundInstructions = round 
     ? `This is a ${round.name} interview. Focus specifically on ${round.focus}. Ask questions that are appropriate for this round type.`
     : "";
+  
+  // Build job context with description
+  let jobContext = `Role: ${jobRole} (${s.level} level)`;
+  if (s.jobDescription && s.jobDescription.trim() !== "") {
+    jobContext += `\n\nJob Description:\n${s.jobDescription.trim()}\n\nUse this job description to tailor your questions to the specific role requirements, responsibilities, and skills needed. Ask questions that are directly relevant to what the job description mentions.`;
+  }
   
   const content = await llm(
     [
@@ -398,16 +449,20 @@ ${history || "(no previous messages)"}
 
 CRITICAL LANGUAGE REQUIREMENT: You MUST respond in ${languageName} (language code: ${s.language}). Every word you generate must be in ${languageName}. Do not use English or any other language.
 
-Now continue as the interviewer for a ${s.level} ${s.role} interview${round ? ` (${round.name})` : ""}.
+${jobContext}
+
+Now continue as the interviewer for this interview${round ? ` (${round.name})` : ""}.
 ${roundInstructions}
 ${round ? `ROUND TYPE: This is a ${round.name}. You MUST ask questions focused on: ${round.focus}.` : ""}
+${s.jobDescription ? `IMPORTANT: Reference the job description above when asking questions. Make your questions relevant to the specific role requirements mentioned in the job description.` : ""}
 
-Be natural: you may briefly acknowledge their answer (1 short sentence) and ask a focused follow-up that is relevant to ${round ? round.focus : "the role and level"}.
+Be natural: you may briefly acknowledge their answer (1 short sentence) and ask a focused follow-up that is relevant to ${round ? round.focus : "the role and level"}${s.jobDescription ? " and the job description" : ""}.
 Keep it concise (20–60 words). One paragraph. 
 
 CRITICAL REQUIREMENTS:
 1. Respond ONLY in ${languageName}. Do not use English or any other language.
-2. You must NEVER start your response with the word 'Interviewer' or 'Interviewer:' or any speaker label. Always start directly with your question or statement. Do not use any prefixes, labels, or speaker identifiers.`
+2. You must NEVER start your response with the word 'Interviewer' or 'Interviewer:' or any speaker label. Always start directly with your question or statement. Do not use any prefixes, labels, or speaker identifiers.
+3. ${s.jobDescription ? "Make sure your questions are tailored to the job description provided above." : ""}`
       }
     ],
     { temperature: 0.7 }
@@ -686,6 +741,8 @@ wss.on("connection", (ws) => {
           role: msg.role,
           roleName: msg.roleName,
           roleId: msg.roleId,
+          customJobRole: msg.customJobRole,
+          jobDescription: msg.jobDescription,
           selectedLanguage: msg.selectedLanguage,
           selectedRound: msg.selectedRound,
           level: msg.level,
@@ -710,6 +767,8 @@ wss.on("connection", (ws) => {
           role: isValid(msg.role) ? msg.role : 
                 (isValid(msg.roleName) ? msg.roleName : "Software Engineer"),
           roleId: isValid(msg.roleId) ? msg.roleId : undefined,
+          customJobRole: isValid(msg.customJobRole) ? msg.customJobRole : undefined,
+          jobDescription: isValid(msg.jobDescription) ? msg.jobDescription : undefined,
           selectedLanguage: isValid(msg.selectedLanguage) ? msg.selectedLanguage : "java",
           selectedRound: isValid(msg.selectedRound) ? msg.selectedRound : "technical",
           level: isValid(msg.level) ? msg.level : "junior",
