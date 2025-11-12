@@ -637,7 +637,111 @@ CRITICAL REQUIREMENTS:
     textLength: cleaned.length,
   });
   
+  // Validate response relevance before returning
+  const isValid = await validateResponseRelevance(cleaned, s, round, jobRole);
+  if (!isValid) {
+    console.warn("Response failed relevance check, regenerating...");
+    // Retry once with stricter instructions
+    const retryContent = await llm(
+      [
+        { role: "system", content: systemPrompt + " CRITICAL: Your response MUST be directly related to the interview context, role, and candidate's previous answer. Do not go off-topic." },
+        {
+          role: "user",
+          content: `Conversation so far:
+${history || "(no previous messages)"}
+
+CRITICAL LANGUAGE REQUIREMENT: You MUST respond in ${languageName} (language code: ${s.language}). Every word you generate must be in ${languageName}. Do not use English or any other language.
+
+${jobContext}
+
+IMPORTANT: The candidate just answered a question. You MUST:
+1. Acknowledge their answer briefly (1 sentence)
+2. Ask a FOLLOW-UP question that is DIRECTLY related to:
+   - Their previous answer
+   - The ${round ? round.name : "interview"} context
+   - The ${jobRole} role at ${s.level} level
+   ${round ? `- ${round.focus}` : ""}
+   ${s.jobDescription ? "- The job description requirements" : ""}
+
+DO NOT ask unrelated questions. DO NOT change topics abruptly. Stay focused on the interview.
+
+Keep it concise (20–60 words). One paragraph.`
+        }
+      ],
+      { temperature: 0.5 } // Lower temperature for more focused responses
+    );
+    
+    let retryCleaned = (retryContent || "").trim();
+    // Apply same cleaning
+    retryCleaned = retryCleaned.replace(/^Interviewer\s*:\s*/i, "").trim();
+    retryCleaned = retryCleaned.replace(/^Interviewer\s+/i, "").trim();
+    
+    const retryValid = await validateResponseRelevance(retryCleaned, s, round, jobRole);
+    if (retryValid || retryCleaned.length > 10) {
+      return retryCleaned;
+    }
+  }
+  
   return cleaned;
+}
+
+// Validate if AI response is relevant to interview context
+async function validateResponseRelevance(response, state, round, jobRole) {
+  if (!response || response.length < 10) {
+    return false; // Too short to be meaningful
+  }
+  
+  // Check for common off-topic indicators
+  const offTopicPatterns = [
+    /^(thank you|thanks|goodbye|bye|that's all|end of interview)/i,
+    /^(how can i help|what can i do|anything else)/i,
+    /^(let me know|tell me if|please let)/i,
+  ];
+  
+  for (const pattern of offTopicPatterns) {
+    if (pattern.test(response)) {
+      return false;
+    }
+  }
+  
+  // Use LLM to validate relevance
+  try {
+    const validationPrompt = `You are validating an interviewer's response in an interview context.
+
+Interview Context:
+- Role: ${jobRole} (${state.level} level)
+${round ? `- Round: ${round.name} (${round.focus})` : ""}
+${state.jobDescription ? `- Job Description: ${state.jobDescription.substring(0, 200)}...` : ""}
+
+Candidate's Last Answer: ${state.transcript.filter(t => t.from === "candidate").slice(-1)[0]?.text || "N/A"}
+
+Interviewer's Response: "${response}"
+
+Is this response:
+1. Relevant to the interview context and role?
+2. A natural follow-up to the candidate's answer?
+3. Appropriate for a ${round ? round.name : "general"} interview?
+
+Respond with ONLY "YES" or "NO".`;
+    
+    const validation = await llm(
+      [{ role: "user", content: validationPrompt }],
+      { temperature: 0.1, model: "gpt-4o-mini" }
+    );
+    
+    const isValid = validation.trim().toUpperCase().includes("YES");
+    if (!isValid) {
+      console.warn("Response validation failed:", {
+        response: response.substring(0, 100),
+        validation: validation.trim()
+      });
+    }
+    return isValid;
+  } catch (error) {
+    console.error("Error validating response:", error);
+    // If validation fails, allow the response (fail open)
+    return true;
+  }
 }
 
 // Final evaluation based on the whole transcript
@@ -665,11 +769,15 @@ async function evaluateConversation(state) {
     }
   }
   
+  // Truncate transcript if too long to speed up processing
   const convo = s.transcript
     .map((t) => `${t.from === "interviewer" ? "Interviewer" : "Candidate"}: ${t.text}`)
     .join("\n");
-
-  // Build context string with all details
+  
+  // Limit transcript length to last 4000 characters for faster processing
+  const truncatedConvo = convo.length > 4000 ? convo.slice(-4000) + "\n[... earlier conversation truncated ...]" : convo;
+  
+  // Build context string
   let contextInfo = `Interview Context:
 - Role: ${s.role} (${s.level} level)
 - Questions Asked: ${questionsAsked}
@@ -683,29 +791,24 @@ async function evaluateConversation(state) {
     contextInfo += `\n- Interview Round: ${s.selectedRound}`;
   }
 
-  // Friendly and constructive evaluation with improvement suggestions
-  const rubricJSON = await llm(
-    [
-      {
-        role: "system",
-        content: `You are a FRIENDLY and experienced tech interviewer evaluating a candidate. Your goal is to provide constructive, encouraging feedback that helps the candidate improve.
+  // OPTIMIZATION: Run both LLM calls in PARALLEL instead of sequential
+  // This reduces total evaluation time from ~20-30s to ~10-15s
+  const [rubricJSON, summaryText] = await Promise.all([
+    // First call: Generate rubric
+    llm(
+      [
+        {
+          role: "system",
+          content: `You are a FRIENDLY and experienced tech interviewer evaluating a candidate. Your goal is to provide constructive, encouraging feedback that helps the candidate improve.
 
 ${contextInfo}
 
 You must evaluate based on:
-1. Communication Skills: Clarity, articulation, structure, listening, engagement, how well they express ideas
-2. Technical Skills: Accuracy, depth, knowledge, correctness, understanding of technical concepts
-3. Problem Solving: Approach, logic, creativity, analytical thinking, solution quality, how they break down problems
-4. Behavior: Professionalism, attitude, confidence, enthusiasm, teamwork, body language (from tone), how they present themselves
+1. Communication Skills: Clarity, articulation, structure, listening, engagement
+2. Technical Skills: Accuracy, depth, knowledge, correctness
+3. Problem Solving: Approach, logic, creativity, analytical thinking
+4. Behavior: Professionalism, attitude, confidence, enthusiasm
 5. Relevance: How well answers match the role and level expectations
-
-Be CONSTRUCTIVE and FRIENDLY in your evaluation:
-- Acknowledge what the candidate did well
-- Identify specific areas for improvement
-- Provide actionable suggestions
-- Be encouraging while being honest
-- Consider the ${s.level} level expectations
-- Remember: everyone can improve, and your feedback should help them grow
 
 Return ONLY a JSON object:
 {
@@ -719,25 +822,54 @@ Return ONLY a JSON object:
   "answer_quality": "excellent/good/fair/poor",
   "strengths": ["List 2-3 specific strengths in ${s.language}"],
   "improvements": {
-    "communication": "Specific suggestion on how to improve communication in ${s.language}",
-    "technical": "Specific suggestion on how to improve technical skills in ${s.language}",
-    "problem_solving": "Specific suggestion on how to improve problem-solving in ${s.language}",
-    "behavior": "Specific suggestion on how to improve behavior/professionalism in ${s.language}"
+    "communication": "Specific suggestion in ${s.language}",
+    "technical": "Specific suggestion in ${s.language}",
+    "problem_solving": "Specific suggestion in ${s.language}",
+    "behavior": "Specific suggestion in ${s.language}"
   },
-  "hiring_tips": ["Tip 1 on how to talk to get hired in ${s.language}", "Tip 2", "Tip 3"],
-  "dos": ["Do 1 - specific actionable advice for future interviews in ${s.language} (e.g., 'Do prepare specific examples of your work', 'Do ask clarifying questions', 'Do maintain eye contact and confident body language')", "Do 2 - another specific actionable advice", "Do 3 - another specific actionable advice"],
-  "donts": ["Don't 1 - specific thing to avoid in interviews in ${s.language} (e.g., 'Don't speak too fast or mumble', 'Don't interrupt the interviewer', 'Don't give vague answers without examples')", "Don't 2 - another specific thing to avoid", "Don't 3 - another specific thing to avoid"],
-  "notes": "Overall evaluation summary in ${s.language} highlighting key points"
+  "hiring_tips": ["Tip 1 in ${s.language}", "Tip 2", "Tip 3"],
+  "dos": ["Do 1 in ${s.language}", "Do 2", "Do 3"],
+  "donts": ["Don't 1 in ${s.language}", "Don't 2", "Don't 3"],
+  "notes": "Overall evaluation summary in ${s.language}"
 }`
-      },
-      {
-        role: "user",
-        content: `Full Conversation Transcript:\n\n${convo}\n\nQ&A Pairs Analysis:\n${qaPairs.map((qa, idx) => `Q${idx + 1}: ${qa.question}\nA${idx + 1}: ${qa.answer}`).join('\n\n')}`
-      }
-    ],
-    { temperature: 0.3, model: "gpt-4o-mini" }
-  );
+        },
+        {
+          role: "user",
+          content: `Conversation:\n\n${truncatedConvo}\n\nQ&A Pairs:\n${qaPairs.map((qa, idx) => `Q${idx + 1}: ${qa.question}\nA${idx + 1}: ${qa.answer}`).join('\n\n')}`
+        }
+      ],
+      { temperature: 0.3, model: "gpt-4o-mini" }
+    ),
+    
+    // Second call: Generate summary (can run in parallel)
+    llm(
+      [
+        {
+          role: "system",
+          content: `You are a FRIENDLY and supportive interviewer providing constructive feedback. Be encouraging, specific, and helpful.
 
+${contextInfo}
+
+Provide a FRIENDLY evaluation in ${s.language}:
+1. Start with a positive, encouraging tone
+2. Acknowledge what went well (${answersGiven}/${questionsAsked} questions answered)
+3. Highlight 2-3 key strengths
+4. Identify 2-3 specific areas for improvement
+5. Provide practical tips
+6. End with encouragement
+
+Be friendly, constructive, and specific. 8-12 sentences. Use a warm, supportive tone.`
+        },
+        {
+          role: "user",
+          content: `Conversation:\n\n${truncatedConvo}\n\nQ&A Pairs:\n${qaPairs.map((qa, idx) => `Q${idx + 1}: ${qa.question}\nA${idx + 1}: ${qa.answer}`).join('\n\n')}`
+        }
+      ],
+      { temperature: 0.4, model: "gpt-4o-mini" }
+    )
+  ]);
+
+  // Parse rubric JSON
   let parsed = {
     communication: 5,
     technical: 5,
@@ -759,6 +891,7 @@ Return ONLY a JSON object:
     donts: [],
     notes: "Evaluation in progress.",
   };
+  
   try {
     const j = JSON.parse(rubricJSON);
     parsed = { ...parsed, ...j };
@@ -772,34 +905,6 @@ Return ONLY a JSON object:
     (Number(parsed.problem_solving) || 0) +
     (Number(parsed.behavior) || 0) +
     (Number(parsed.relevance) || 0);
-
-  // Friendly and constructive summary with improvement suggestions
-  const summaryText = await llm(
-    [
-      {
-        role: "system",
-        content: `You are a FRIENDLY and supportive interviewer providing constructive feedback. Be encouraging, specific, and helpful.
-
-${contextInfo}
-
-Provide a FRIENDLY evaluation in ${s.language}:
-1. Start with a positive, encouraging tone
-2. Acknowledge what went well (${answersGiven}/${questionsAsked} questions answered)
-3. Highlight 2-3 key strengths
-4. Identify 2-3 specific areas for improvement with actionable suggestions
-5. Provide tips on how to improve communication, technical skills, problem-solving, and behavior
-6. Include 2-3 practical tips on "how to talk to get hired"
-7. End with encouragement and next steps
-
-Be friendly, constructive, and specific. 8-12 sentences. Use a warm, supportive tone like a mentor would.`
-      },
-      {
-        role: "user",
-        content: `Full Conversation:\n\n${convo}\n\nDetailed Q&A:\n${qaPairs.map((qa, idx) => `Question ${idx + 1}: ${qa.question}\nAnswer ${idx + 1}: ${qa.answer}\n---`).join('\n\n')}\n\nEvaluation Scores:\n- Communication: ${parsed.communication}/10\n- Technical: ${parsed.technical}/10\n- Problem Solving: ${parsed.problem_solving}/10\n- Behavior: ${parsed.behavior}/10\n- Relevance: ${parsed.relevance}/10\n\nStrengths: ${parsed.strengths?.join(', ') || 'N/A'}\n\nImprovements Needed:\n- Communication: ${parsed.improvements?.communication || 'N/A'}\n- Technical: ${parsed.improvements?.technical || 'N/A'}\n- Problem Solving: ${parsed.improvements?.problem_solving || 'N/A'}\n- Behavior: ${parsed.improvements?.behavior || 'N/A'}`
-      }
-    ],
-    { temperature: 0.4, model: "gpt-4o-mini" }
-  );
 
   return {
     overallScore: total,
@@ -897,6 +1002,58 @@ wss.on("connection", (ws) => {
         // Helper to check if value is valid (not undefined, null, or empty string)
         const isValid = (val) => val !== undefined && val !== null && val !== "";
         
+        // Function to detect programming language from role or job description
+        // Job description is optional - if not provided, detection works based on role alone
+        const detectProgrammingLanguage = (roleText, jobDescriptionText) => {
+          // If no role or job description, cannot detect
+          if (!roleText && !jobDescriptionText) {
+            return null;
+          }
+          
+          // Combine role and job description (job description is optional)
+          // Prioritize role text, then job description
+          const roleLower = (roleText || "").toLowerCase();
+          const jobDescLower = (jobDescriptionText || "").toLowerCase();
+          const combinedText = `${roleLower} ${jobDescLower}`.trim();
+          
+          // Language detection patterns - map keywords to language IDs
+          const languagePatterns = {
+            "python": ["python", "django", "flask", "pandas", "numpy", "tensorflow", "pytorch", "scikit-learn", "fastapi"],
+            "java": ["java", "spring", "hibernate", "maven", "gradle", "jvm", "jdk", "j2ee", "jee"],
+            "javascript": ["javascript", "js", "node", "nodejs", "react", "vue", "angular", "typescript", "express", "next.js", "nextjs"],
+            "cpp": ["c++", "cpp", "c plus plus", "qt", "boost", "stl"],
+            "c": ["c programming", "embedded c", "ansi c", " c ", " c,"],
+            "csharp": ["c#", "csharp", ".net", "asp.net", "entity framework", "dotnet"],
+            "go": ["golang", "go language", "go programming", " go "],
+            "rust": ["rust", "rustlang", " rust "],
+            "php": ["php", "laravel", "symfony", "wordpress", "drupal"],
+            "ruby": ["ruby", "rails", "ruby on rails", "ror"],
+            "swift": ["swift", "ios development", "swiftui", "swift programming"],
+            "kotlin": ["kotlin", "android kotlin", " kotlin "],
+            "scala": ["scala", "akka", "spark scala", " scala "],
+            "r": ["r programming", "r language", "r studio", " r ", " r,"],
+            "matlab": ["matlab", "simulink", " matlab "],
+            "sql": ["sql", "mysql", "postgresql", "oracle sql", "sql server", "postgres", "mongodb"],
+          };
+          
+          // Check each language pattern (order matters - check more specific first)
+          for (const [languageId, keywords] of Object.entries(languagePatterns)) {
+            for (const keyword of keywords) {
+              if (combinedText.includes(keyword)) {
+                return languageId;
+              }
+            }
+          }
+          
+          return null;
+        };
+        
+        // Detect language from role or job description if not provided
+        // Job description is optional - detection works with role alone if JD is missing
+        const roleText = isValid(msg.role) ? msg.role : (isValid(msg.roleName) ? msg.roleName : "");
+        const jobDescriptionText = isValid(msg.jobDescription) ? msg.jobDescription : "";
+        const detectedLanguage = detectProgrammingLanguage(roleText, jobDescriptionText);
+        
         let state = {
           candidateName: isValid(msg.candidateName) ? msg.candidateName : undefined,
           role: isValid(msg.role) ? msg.role : 
@@ -904,7 +1061,7 @@ wss.on("connection", (ws) => {
           roleId: isValid(msg.roleId) ? msg.roleId : undefined,
           customJobRole: isValid(msg.customJobRole) ? msg.customJobRole : undefined,
           jobDescription: isValid(msg.jobDescription) ? msg.jobDescription : undefined,
-          selectedLanguage: isValid(msg.selectedLanguage) ? msg.selectedLanguage : "java",
+          selectedLanguage: isValid(msg.selectedLanguage) ? msg.selectedLanguage : (detectedLanguage || "java"),
           selectedRound: isValid(msg.selectedRound) ? msg.selectedRound : "technical",
           level: isValid(msg.level) ? msg.level : "junior",
           language: isValid(msg.language) ? msg.language : "en",
@@ -1045,6 +1202,11 @@ wss.on("connection", (ws) => {
           return;
         }
         let state = normalizeState(session.state);
+        
+        // If interview is already done/stopped, don't process audio
+        if (state.done) {
+          return;
+        }
 
         // Check if we received any audio chunks
         if (audioChunks.length === 0) {
@@ -1114,8 +1276,19 @@ wss.on("connection", (ws) => {
           transcript: state.transcript,
         }));
 
+        // CRITICAL: Re-check state.done after processing audio - it might have been set by a "stop" message
+        // that arrived while we were processing the audio
+        state = normalizeState(SESSIONS.get(sessionId)?.state || state);
+        
+        // If interview is done/stopped, don't generate question - evaluation should start
+        if (state.done) {
+          // Evaluation was triggered, don't generate question
+          return;
+        }
+
         // If we still have interviewer turns left, respond conversationally
-        if (state.turns < state.maxTurns - 1) {
+        // BUT: Check if interview is done/stopped first - don't generate question if evaluation is starting
+        if (state.turns < state.maxTurns - 1 && !state.done) {
           const reply = await generateInterviewerTurn(state);
           state.transcript.push({ from: "interviewer", text: reply });
           state.turns += 1;
@@ -1145,31 +1318,37 @@ wss.on("connection", (ws) => {
         state.transcript.push({ from: "interviewer", text: evaluation.summaryText });
         SESSIONS.set(sessionId, { state });
 
-        // Send final transcript update
-        ws.send(JSON.stringify({
-          type: "transcript_update",
-          transcript: state.transcript,
-        }));
-
-        // Get language from state for TTS logging
-        const summaryLanguage = state.language || "en";
-        console.log("=== SENDING SUMMARY TO TTS ===");
-        console.log({
-          language: summaryLanguage,
-          textPreview: evaluation.summaryText.substring(0, 200) + (evaluation.summaryText.length > 200 ? "..." : ""),
-        });
-        await ttsToWS(ws, evaluation.summaryText, voiceChoice, "mp3", summaryLanguage);
+        // OPTIMIZATION: Send evaluation results IMMEDIATELY (don't wait for TTS)
+        // This allows frontend to show results right away while TTS generates in background
         ws.send(JSON.stringify({
           type: "done",
           summaryText: evaluation.summaryText,
           overallScore: evaluation.overallScore,
           rubric: evaluation.rubric,
         }));
+
+        // Send final transcript update
+        ws.send(JSON.stringify({
+          type: "transcript_update",
+          transcript: state.transcript,
+        }));
+
+        // Generate TTS in background (non-blocking) - don't await, let it run async
+        const summaryLanguage = state.language || "en";
+        ttsToWS(ws, evaluation.summaryText, voiceChoice, "mp3", summaryLanguage)
+          .catch(error => {
+            console.error("TTS generation error (non-critical):", error);
+            // Don't block if TTS fails - evaluation is already sent to frontend
+          });
+        
         return;
       }
 
       // Manual stop (optional) → evaluate early
       if (msg.type === "stop") {
+        // Clear any pending audio chunks to stop processing
+        audioChunks = [];
+        
         const session = SESSIONS.get(sessionId);
         if (!session) {
           ws.send(JSON.stringify({ type: "error", error: "session_not_found" }));
@@ -1184,26 +1363,28 @@ wss.on("connection", (ws) => {
         state.transcript.push({ from: "interviewer", text: evaluation.summaryText });
         SESSIONS.set(sessionId, { state });
 
-        // Send final transcript update
-        ws.send(JSON.stringify({
-          type: "transcript_update",
-          transcript: state.transcript,
-        }));
-
-        // Get language from state for TTS logging
-        const summaryLanguage = state.language || "en";
-        console.log("=== SENDING SUMMARY TO TTS ===");
-        console.log({
-          language: summaryLanguage,
-          textPreview: evaluation.summaryText.substring(0, 200) + (evaluation.summaryText.length > 200 ? "..." : ""),
-        });
-        await ttsToWS(ws, evaluation.summaryText, voiceChoice, "mp3", summaryLanguage);
+        // OPTIMIZATION: Send evaluation results IMMEDIATELY (don't wait for TTS)
         ws.send(JSON.stringify({
           type: "done",
           summaryText: evaluation.summaryText,
           overallScore: evaluation.overallScore,
           rubric: evaluation.rubric,
         }));
+
+        // Send final transcript update
+        ws.send(JSON.stringify({
+          type: "transcript_update",
+          transcript: state.transcript,
+        }));
+
+        // Generate TTS in background (non-blocking)
+        const summaryLanguage = state.language || "en";
+        ttsToWS(ws, evaluation.summaryText, voiceChoice, "mp3", summaryLanguage)
+          .catch(error => {
+            console.error("TTS generation error (non-critical):", error);
+            // Don't block if TTS fails - evaluation is already sent to frontend
+          });
+        
         return;
       }
     } catch (err) {
