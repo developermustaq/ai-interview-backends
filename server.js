@@ -120,6 +120,22 @@ const wss = new WebSocketServer({
   perMessageDeflate: false
 });
 
+// Add ping interval to keep connections alive (prevents disconnections in production)
+const pingInterval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    if (ws.isAlive === false) {
+      return ws.terminate();
+    }
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, 30000); // Send ping every 30 seconds
+
+// Clean up interval when server closes
+server.on('close', () => {
+  clearInterval(pingInterval);
+});
+
 // OpenAI API key with fallback (you can set your actual key here as fallback)
 // IMPORTANT: Replace 'your-openai-api-key-here' with your actual API key
 // Or set it via environment variable: OPENAI_API_KEY=sk-your-key-here
@@ -953,6 +969,14 @@ wss.on("connection", (ws) => {
   let sessionId = null;
   let audioChunks = [];
   let voiceChoice = "alloy";
+  
+  // Initialize connection as alive for keepalive mechanism
+  ws.isAlive = true;
+  
+  // Handle pong response to keep connection alive
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
 
   ws.on("message", async (data, isBinary) => {
     try {
