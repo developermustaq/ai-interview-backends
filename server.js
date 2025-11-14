@@ -120,21 +120,54 @@ const wss = new WebSocketServer({
   perMessageDeflate: false
 });
 
-// Add ping interval to keep connections alive (prevents disconnections in production)
-const pingInterval = setInterval(() => {
+// Add ping interval to keep connections alive (only in production to prevent load balancer timeouts)
+// In development, this can cause issues, so we skip it locally
+// Check NODE_ENV explicitly - default to development if not set
+const isProduction = process.env.NODE_ENV === 'production';
+const pingInterval = isProduction ? setInterval(() => {
   wss.clients.forEach((ws) => {
-    if (ws.isAlive === false) {
-      return ws.terminate();
+    try {
+      // Skip if connection is already closed or closing
+      // WebSocket.OPEN is 1, but we can also check the readyState property
+      if (ws.readyState !== 1) { // 1 = OPEN
+        return;
+      }
+      
+      // Only check isAlive if it was set (i.e., connection was established with keepalive)
+      // If isAlive is undefined, it means this connection was established before keepalive was enabled
+      // or in development mode, so skip the check
+      if (ws.isAlive === undefined) {
+        return; // Connection doesn't have keepalive enabled, skip
+      }
+      
+      // Only terminate if connection was marked as dead from previous ping cycle
+      if (ws.isAlive === false) {
+        console.log('Terminating dead WebSocket connection (no pong response after 30s)');
+        ws.terminate();
+        return;
+      }
+      
+      // Mark as potentially dead, send ping, wait for pong to set it back to true
+      ws.isAlive = false;
+      ws.ping();
+    } catch (error) {
+      console.error('Error in ping interval:', error);
     }
-    ws.isAlive = false;
-    ws.ping();
   });
-}, 30000); // Send ping every 30 seconds
+}, 30000) : null; // Send ping every 30 seconds in production only
+
+if (pingInterval) {
+  console.log('WebSocket keepalive (ping/pong) enabled for production');
+} else {
+  console.log('WebSocket keepalive disabled (development mode)');
+}
 
 // Clean up interval when server closes
-server.on('close', () => {
-  clearInterval(pingInterval);
-});
+if (pingInterval) {
+  server.on('close', () => {
+    clearInterval(pingInterval);
+  });
+}
 
 // OpenAI API key with fallback (you can set your actual key here as fallback)
 // IMPORTANT: Replace 'your-openai-api-key-here' with your actual API key
@@ -970,12 +1003,28 @@ wss.on("connection", (ws) => {
   let audioChunks = [];
   let voiceChoice = "alloy";
   
-  // Initialize connection as alive for keepalive mechanism
-  ws.isAlive = true;
+  // Log connection for debugging
+  console.log(`WebSocket connection opened. NODE_ENV: ${process.env.NODE_ENV || 'development'}`);
   
-  // Handle pong response to keep connection alive
-  ws.on('pong', () => {
+  // Initialize connection as alive for keepalive mechanism (only needed in production)
+  // IMPORTANT: Only set isAlive if ping interval is actually running
+  if (isProduction && pingInterval) {
     ws.isAlive = true;
+    
+    // Handle pong response to keep connection alive
+    ws.on('pong', () => {
+      ws.isAlive = true;
+    });
+  }
+  
+  // Handle connection errors
+  ws.on('error', (error) => {
+    console.error('WebSocket error:', error);
+  });
+  
+  // Handle connection close
+  ws.on('close', (code, reason) => {
+    console.log(`WebSocket connection closed. Code: ${code}, Reason: ${reason?.toString() || 'none'}`);
   });
 
   ws.on("message", async (data, isBinary) => {
