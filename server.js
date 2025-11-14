@@ -10,6 +10,9 @@ import OpenAI from "openai";
 
 dotenv.config();
 
+// Set NODE_ENV to production for deployment
+process.env.NODE_ENV = 'production';
+
 // Keep LangGraph minimal: use it for persona (stateful, no loops)
 import { StateGraph, Annotation } from "@langchain/langgraph";
 
