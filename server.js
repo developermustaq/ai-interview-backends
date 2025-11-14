@@ -124,6 +124,8 @@ const wss = new WebSocketServer({
 // In development, this can cause issues, so we skip it locally
 // Check NODE_ENV explicitly - default to development if not set
 const isProduction = process.env.NODE_ENV === 'production';
+// Use 20 seconds instead of 30 to be safer with load balancers that have 20-30s idle timeouts
+const PING_INTERVAL_MS = 20000; // 20 seconds - ping more frequently to prevent timeouts
 const pingInterval = isProduction ? setInterval(() => {
   wss.clients.forEach((ws) => {
     try {
@@ -142,7 +144,7 @@ const pingInterval = isProduction ? setInterval(() => {
       
       // Only terminate if connection was marked as dead from previous ping cycle
       if (ws.isAlive === false) {
-        console.log('Terminating dead WebSocket connection (no pong response after 30s)');
+        console.log(`[${new Date().toISOString()}] Terminating dead WebSocket connection (no pong response after ${PING_INTERVAL_MS}ms)`);
         ws.terminate();
         return;
       }
@@ -150,14 +152,18 @@ const pingInterval = isProduction ? setInterval(() => {
       // Mark as potentially dead, send ping, wait for pong to set it back to true
       ws.isAlive = false;
       ws.ping();
+      // Log ping for debugging (can be removed in production if too verbose)
+      if (process.env.DEBUG_WEBSOCKET === 'true') {
+        console.log(`[${new Date().toISOString()}] Sent ping to WebSocket client`);
+      }
     } catch (error) {
       console.error('Error in ping interval:', error);
     }
   });
-}, 30000) : null; // Send ping every 30 seconds in production only
+}, PING_INTERVAL_MS) : null; // Send ping every 20 seconds in production only
 
 if (pingInterval) {
-  console.log('WebSocket keepalive (ping/pong) enabled for production');
+  console.log(`WebSocket keepalive (ping/pong) enabled for production - pinging every ${PING_INTERVAL_MS / 1000}s`);
 } else {
   console.log('WebSocket keepalive disabled (development mode)');
 }
@@ -1015,6 +1021,10 @@ wss.on("connection", (ws) => {
     // Handle pong response to keep connection alive
     ws.on('pong', () => {
       ws.isAlive = true;
+      // Log pong for debugging (can be removed in production if too verbose)
+      if (process.env.DEBUG_WEBSOCKET === 'true') {
+        console.log(`[${new Date().toISOString()}] Received pong from WebSocket client`);
+      }
     });
   }
   
